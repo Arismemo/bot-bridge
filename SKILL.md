@@ -6,23 +6,27 @@
 
 ## 🚀 一键部署（推荐）
 
-只需执行以下命令，自动完成所有配置和部署：
+只需执行以下命令，通过交互式配置完成所有部署：
 
 ```
-curl -sSL https://raw.githubusercontent.com/Arismemo/bot-bridge/master/deploy-bot.sh | bash -s -- <BOT_ID> <TELEGRAM_BOT_TOKEN> <TELEGRAM_CHAT_IDS>
+curl -sSL https://raw.githubusercontent.com/Arismemo/bot-bridge/master/deploy-bot.sh | bash
 ```
 
-**示例：**
-```
-curl -sSL https://raw.githubusercontent.com/Arismemo/bot-bridge/master/deploy-bot.sh | bash -s -- xiaoc 123456:ABC-DEF -5094630990
+部署脚本会交互式询问以下信息：
+- ✅ 机器人 ID（必填）
+- ✅ Telegram Bot Token（可选）
+- ✅ Telegram 群聊 ID（可选，支持多个）
+- ✅ 中转服务器地址
+- ✅ Webhook 服务端口
+- ✅ 是否立即启动服务
+- ✅ 是否设置 Telegram Webhook
+
+**执行示例：**
+```bash
+curl -sSL https://raw.githubusercontent.com/Arismemo/bot-bridge/master/deploy-bot.sh | bash
 ```
 
-**自动执行：**
-- ✅ 下载 bot-bridge 客户端
-- ✅ 安装 npm 依赖
-- ✅ 配置环境变量（.env）
-- ✅ 启动 Webhook 服务器（PM2 或后台进程）
-- ✅ 设置 Telegram Webhook（可选）
+然后按照提示输入配置信息即可。
 
 ---
 
