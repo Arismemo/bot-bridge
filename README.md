@@ -1,8 +1,8 @@
-# Bot Bridge - OpenClaw Bot 互通信中转服务 (WebSocket 版本)
+# Bot Bridge - OpenClaw Bot 互通信中转 (Context-Aware 版本)
 
 ## 📋 概述
 
-Bot Bridge 是一个支持 WebSocket 的 HTTP API 服务，用于在多个 OpenClaw bot 之间**实时**传递消息，同时支持 Telegram Bot API 集成，实现机器人在 Telegram 群聊里的对话。
+Bot Bridge 是一个支持 WebSocket 的 HTTP API 服务，用于在多个 OpenClaw bot 之间实时传递消息。新版本支持**上下文感知**：机器人能够看到 Telegram 群聊的完整聊天记录（包括人类消息），并基于此决定是否/如何回复。
 
 ---
 
@@ -11,39 +11,25 @@ Bot Bridge 是一个支持 WebSocket 的 HTTP API 服务，用于在多个 OpenC
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Telegram 群聊                            │
+│   人类消息 + Bot 消息（通过 webhook/轮询获取）         │
 └─────────────────────────────────────────────────────────────┘
-       │                                    │
-       │ Bot API                           │ Bot API
-       ▼                                    ▼
-┌──────────────┐                      ┌──────────────┐
-│    小C       │                      │   小D        │
-│  OpenClaw    │                      │  OpenClaw    │
-└──────┬───────┘                      └──────┬───────┘
-       │                                     │
-       │ 发送到群聊 + 同时发送到 Bridge Server │
-       ▼                                     ▼
-       └──────────────┬──────────────────────┘
-                      │
-        ┌─────────────▼─────────────┐
-        │   Bridge Server (WebSocket)│
-        │      HTTP + WS 端点        │
-        └─────────────┬─────────────┘
-                      │
-                      ▼
-              ┌──────────────┐
-              │  SQLite DB   │
-              └──────────────┘
+                          │
+                          ↓ (监听)
+              ┌───────────▼───────────┐
+              │   上下文合并层        │
+              │  Telegram + Bridge     │
+              │  消息按时间合并       │
+              └───────────┬───────────┘
+                          │
+              ┌───────────┴───────────┐
+              │   决定是否/如何回复    │
+              └───────────┬───────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ↓                 ↓                 ↓
+   Telegram          Bridge Server      其他 Bot
+  (发送回复)        (通知)         (实时通信)
 ```
-
-### 工作流程
-
-1. **小C 在群聊发送消息**
-   - 通过 Telegram Bot API 发送到群聊
-   - 同时通过 WebSocket 发送到 Bridge Server
-
-2. **小D 接收消息**
-   - 通过 WebSocket 实时收到 Bridge Server 的通知
-   - 通过 Telegram Bot API 在群聊回复
 
 ---
 
@@ -67,10 +53,11 @@ npm start
 ### 3. 配置并启动客户端
 
 ```bash
+# 支持多个群聊，用逗号分隔
 export BRIDGE_API_URL=http://localhost:3000
 export BOT_ID=xiaoc
 export TELEGRAM_BOT_TOKEN=your_bot_token
-export TELEGRAM_CHAT_ID=-5094630990
+export TELEGRAM_CHAT_IDS=-5094630990,-1000000000
 
 npm run start:client
 ```
@@ -88,96 +75,92 @@ npm run start:client
 | `BRIDGE_API_URL` | API 服务地址 | http://localhost:3000 |
 | `BOT_ID` | Bot 唯一标识 | required |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | optional |
-| `TELEGRAM_CHAT_ID` | Telegram 群聊 ID | optional |
+| `TELEGRAM_CHAT_IDS` | 群聊 ID（支持多个，逗号分隔）| optional |
 
 ---
 
-## 📡 WebSocket 协议
+## 💻 客户端使用示例
 
-### 连接
+### 基本使用（上下文感知）
 
-```
-ws://localhost:3000/?bot_id=xiaoc
-```
+```javascript
+const { ContextAwareBot } = require('./client/index');
 
-### 消息类型
+const bot = new ContextAwareBot({
+  apiUrl: 'http://localhost:3000',
+  botId: 'xiaoc',
+  telegramBotToken: 'your_bot_token',
+  telegramChatIds: ['-5094630990', '-1000000000']
+});
 
-#### 客户端发送
+// 监听所有新消息（来自 Telegram 和 Bridge）
+bot.onNewMessage = (message) => {
+  console.log(`[${message.source}] ${message.sender}: ${message.content}`);
+};
 
-**发送消息给指定 bot：**
-```json
-{
-  "type": "send",
-  "sender": "xiaoc",
-  "recipient": "xiaod",
-  "content": "你好小D",
-  "metadata": {
-    "telegram_message_id": 123
+// 自定义回复决策逻辑
+bot.onDecideReply = (context) => {
+  // context 是最近的聊天记录数组
+  // 返回 { shouldReply: boolean, reply: string, notifyRecipient: string }
+  // 或 null 表示不回复
+
+  const lastMessage = context[context.length - 1];
+
+  // 示例：如果 @ 了这个 bot，回复
+  if (lastMessage.content.includes(`@${this.botId}`)) {
+    return {
+      shouldReply: true,
+      reply: `收到 @ 提醒！`,
+      notifyRecipient: null
+    };
   }
-}
+
+  // 示例：如果其他 bot 发送了消息，可能回复
+  if (lastMessage.source === 'bridge') {
+    return {
+      shouldReply: true,
+      reply: `我看到了你的消息！`,
+      notifyRecipient: lastMessage.sender
+    };
+  }
+
+  return null; // 不回复
+};
+
+// 发送消息到群聊（同时通知其他 bot）
+await bot.sendMessageToGroup('-5094630990', '大家好！', {
+  alsoNotifyBridge: true,
+  notifyRecipient: 'xiaod' // 可选：通知特定 bot
+});
 ```
 
-**广播消息给所有 bot：**
-```json
-{
-  "type": "broadcast",
-  "sender": "xiaoc",
-  "content": "大家好",
-  "metadata": {}
-}
+### 处理 Telegram 消息（Webhook 或轮询）
+
+```javascript
+// 当收到 Telegram webhook 消息时
+app.post('/telegram-webhook', (req, res) => {
+  const telegramMessage = req.body;
+
+  // 交给 ContextAwareBot 处理
+  bot.handleTelegramMessage(telegramMessage);
+
+  res.sendStatus(200);
+});
 ```
 
-**消息确认：**
-```json
-{
-  "type": "ack",
-  "messageId": "xiaoc_1234567890_abc123"
-}
-```
+### 获取完整聊天记录
 
-**心跳：**
-```json
-{
-  "type": "ping"
-}
-```
+```javascript
+// 获取最近 20 条消息（所有来源）
+const history = bot.getChatHistory({ limit: 20 });
+console.log(history);
 
-#### 服务器发送
+// 获取特定群聊的记录
+const groupHistory = bot.getChatHistory({ limit: 20, chatIds: ['-5094630990'] });
 
-**连接确认：**
-```json
-{
-  "type": "connected",
-  "botId": "xiaoc",
-  "timestamp": "2026-02-01T15:00:00.000Z"
-}
-```
-
-**新消息：**
-```json
-{
-  "type": "message",
-  "sender": "xiaod",
-  "content": "你好小C",
-  "metadata": {},
-  "timestamp": "2026-02-01T15:00:00.000Z"
-}
-```
-
-**离线未读消息：**
-```json
-{
-  "type": "unread_messages",
-  "count": 3,
-  "messages": [...]
-}
-```
-
-**心跳响应：**
-```json
-{
-  "type": "pong"
-}
+// 获取格式化的上下文（用于传给 OpenClaw）
+const context = bot.getContext({ limit: 20, chatId: '-5094630990' });
+console.log(context);
 ```
 
 ---
@@ -185,19 +168,7 @@ ws://localhost:3000/?bot_id=xiaoc
 ## 🌐 HTTP API 文档
 
 ### POST /api/messages
-发送消息（HTTP 备用接口）
-
-**请求体：**
-```json
-{
-  "sender": "xiaoc",
-  "recipient": "xiaod",
-  "content": "消息内容",
-  "metadata": {
-    "telegram_message_id": 123
-  }
-}
-```
+发送消息
 
 ### GET /api/messages
 获取消息
@@ -208,94 +179,72 @@ ws://localhost:3000/?bot_id=xiaoc
 ### GET /api/status
 服务状态
 
-**响应：**
-```json
-{
-  "success": true,
-  "status": "running",
-  "unread_count": 5,
-  "connected_bots": 2,
-  "timestamp": "2026-02-01T15:00:00.000Z"
-}
-```
-
 ### GET /api/connections
 获取在线 bot 列表
 
 ---
 
-## 💻 客户端使用示例
+## 📊 上下文合并机制
 
-### 基本使用（WebSocket）
+### 消息来源
 
-```javascript
-const { BotBridgeClient } = require('./client/index');
+1. **Telegram**: 从 Telegram 群聊获取的消息（包括人类消息）
+   - 字段：`source: 'telegram'`
+   - 包含：`userId`, `chatId`, `messageId`
 
-const client = new BotBridgeClient({
-  apiUrl: 'http://localhost:3000',
-  botId: 'xiaoc'
-});
+2. **Bridge**: 从 Bridge Server 获取的 bot 间消息
+   - 字段：`source: 'bridge'`
+   - 包含：`sender` (botId), `metadata`
 
-// 发送消息给小D
-await client.sendMessage('xiaod', '你好小D');
+### 时间顺序合并
 
-// 广播给所有 bot
-await client.broadcast('大家好');
+所有消息按 `timestamp` 字段排序，确保上下文连贯性。
 
-// 处理收到的消息
-client.onMessage = (message) => {
-  console.log(`收到来自 ${message.sender} 的消息: ${message.content}`);
-};
-```
-
-### Telegram 集成
+### 消息格式
 
 ```javascript
-const { BotBridgeTelegram } = require('./client/index');
-
-const bridge = new BotBridgeTelegram({
-  apiUrl: 'http://localhost:3000',
-  botId: 'xiaoc',
-  telegramBotToken: 'your_bot_token',
-  telegramChatId: '-5094630990'
-});
-
-// 发送消息给小D，同时发送到 Telegram 群聊
-await bridge.sendMessage('xiaod', '你好小D');
-
-// 处理来自 Telegram 的消息
-const telegramMessage = {
-  text: '@xiaoc 你好',
-  message_id: 123
-};
-await bridge.handleTelegramMessage(telegramMessage);
+{
+  source: 'telegram' | 'bridge',
+  sender: 'user123' | 'xiaod',
+  userId: 123456789,  // 仅 Telegram
+  chatId: '-5094630990',  // 仅 Telegram
+  content: '消息内容',
+  timestamp: '2026-02-01T15:00:00.000Z',
+  messageId: 123,  // 仅 Telegram
+  metadata: {
+    reply_to_message_id: 456,
+    telegram_message_id: 789
+  }
+}
 ```
 
-### 集成到 OpenClaw
+---
+
+## 🔧 集成到 OpenClaw
 
 创建 `skills/bot-bridge/SKILL.md`：
 
 ```markdown
 # Bot Bridge Skill
 
-使用 Bot Bridge 与其他 OpenClaw 机器人通信，并支持 Telegram 群聊对话。
+使用 Bot Bridge 与其他 OpenClaw 机器人通信，并支持群聊上下文感知。
 
 ## 命令
 
-### bridge send <recipient> <message>
-发送消息给其他机器人
+### bridge send <chat_id> <message>
+发送消息到指定群聊
 
 示例：
 ```
-bridge send xiaod 你好小D
+bridge send -5094630990 你好大家
 ```
 
-### bridge broadcast <message>
-广播消息给所有机器人
+### bridge context [limit] [chat_id]
+查看最近的聊天上下文
 
 示例：
 ```
-bridge broadcast 大家好
+bridge context 20 -5094630990
 ```
 
 ### bridge status
@@ -308,50 +257,18 @@ bridge broadcast 大家好
 BRIDGE_API_URL=http://your-server:3000
 BOT_ID=xiaoc
 TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=-5094630990
+TELEGRAM_CHAT_IDS=-5094630990,-1000000000
 ```
 
-## Telegram 集成
+## Webhook 设置
 
-当启用了 Telegram 集成时：
-1. 收到其他 bot 的消息会自动转发到 Telegram 群聊
-2. 发送消息会同时发送到其他 bot 和 Telegram 群聊
-3. 支持 @ 回复语法（如 @xiaod 你好）
-```
-
----
-
-## 🧪 测试
-
-### 运行所有测试
+需要设置 Telegram Webhook 来接收群聊消息：
 
 ```bash
-npm test
+curl -X POST https://api.telegram.org/bot<token>/setWebhook \
+  -d url=https://your-server.com/telegram-webhook
 ```
-
-**注意：** 当前测试主要针对 HTTP API。WebSocket 测试需要单独的测试框架。
-
-### 手动测试
-
-1. **启动服务端**
-```bash
-npm start
 ```
-
-2. **启动多个客户端（不同终端）**
-
-终端 1 - 小C：
-```bash
-BOT_ID=xiaoc npm run start:client
-```
-
-终端 2 - 小D：
-```bash
-BOT_ID=xiaod npm run start:client
-```
-
-3. **测试通信**
-在小C 的终端输入（如果添加了 REPL）或通过代码调用 `sendMessage`
 
 ---
 
@@ -404,69 +321,44 @@ server {
 
 ## 🔧 故障排除
 
+### 问题：上下文不完整
+
+**检查：**
+1. Telegram webhook 是否正常接收消息
+2. Bot 是否被添加到群聊
+3. `TELEGRAM_CHAT_IDS` 配置是否正确
+
 ### 问题：WebSocket 连接失败
 
 **检查：**
 1. 服务是否启动：`curl http://localhost:3000/health`
 2. 防火墙是否开放端口 3000
-3. `BRIDGE_API_URL` 是否正确
-4. WebSocket URL 格式是否正确
+3. `BRIDGE_API_URL` 配置是否正确
 
-### 问题：收不到消息
+### 问题：消息没有同步
 
 **检查：**
 1. Bot ID 是否配置正确
-2. 是否连接到同一个服务器
+2. 其他 bot 是否连接到同一服务器
 3. 查看服务端日志
-
-### 问题：Telegram 消息未发送
-
-**检查：**
-1. `TELEGRAM_BOT_TOKEN` 是否正确
-2. `TELEGRAM_CHAT_ID` 是否正确
-3. Bot 是否被添加到群聊
-
----
-
-## 📊 性能
-
-### WebSocket vs HTTP 轮询
-
-| 指标 | WebSocket | HTTP 轮询 (5s) |
-|------|-----------|----------------|
-| 实时性 | < 100ms | 0-5s |
-| 网络开销 | 心跳包 ~1KB/min | ~2KB/请求 |
-| 服务器连接 | 1个长期连接 | 每次请求新连接 |
-| 消息延迟 | 推送即达 | 最多5秒 |
-
-### 资源占用
-
-- **服务端内存**: ~60MB (2个bot)
-- **客户端内存**: ~25MB
-- **网络流量**: ~1KB/分钟 (无消息时)
-
----
-
-## 🔐 安全建议
-
-1. **使用 HTTPS/WSS**: 生产环境使用 SSL 证书
-2. **API 认证**: 添加 API Key 验证
-3. **限制访问**: 使用防火墙限制访问来源
-4. **定期清理**: 设置自动删除旧消息
-5. **Telegram Token 安全**: 不要在代码中硬编码 Token
 
 ---
 
 ## 📝 更新日志
+
+### v3.0.0 - Context-Aware 版本
+
+- ✨ 添加上下文感知功能（消息合并）
+- ✨ 支持多个群聊（`TELEGRAM_CHAT_IDS`）
+- ✨ 添加 `ContextAwareBot` 类
+- ✨ 添加消息决策机制
+- 📝 更新文档
 
 ### v2.0.0 - WebSocket 版本
 
 - ✨ 添加 WebSocket 实时通信
 - ✨ 添加 Telegram Bot API 集成
 - ✨ 添加自动重连机制
-- ✨ 添加离线消息队列
-- ✨ 添加消息确认 (ACK)
-- 📝 添加连接状态监控
 - 🐛 修复轮询效率问题
 
 ### v1.0.0 - 初始版本

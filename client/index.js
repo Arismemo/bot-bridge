@@ -1,8 +1,11 @@
 /**
- * Bot Bridge Client (WebSocket 版本)
+ * Bot Bridge Client (Context-Aware 版本)
  *
- * OpenClaw bot 客户端，通过 WebSocket 与中转服务实时通信
- * 兼容 Telegram Bot API 集成
+ * OpenClaw bot 客户端，支持：
+ * - WebSocket 实时通信
+ * - Telegram 群聊消息监听
+ * - 消息合并（Telegram + Bridge）
+ * - 基于上下文的回复决策
  */
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -13,7 +16,7 @@ class BotBridgeClient {
     this.botId = config.botId || process.env.BOT_ID || 'unknown';
     this.ws = null;
     this.connected = false;
-    this.messageQueue = []; // 离线时缓存消息
+    this.messageQueue = [];
     this.onMessage = config.onMessage || (() => {});
     this.onConnectionChange = config.onConnectionChange || (() => {});
     this.onError = config.onError || ((err) => console.error(err));
@@ -22,18 +25,11 @@ class BotBridgeClient {
     this.reconnectDelay = 1000;
     this.httpOnly = config.httpOnly || false;
 
-    // Telegram 配置
-    this.telegramBotToken = config.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
-    this.telegramChatId = config.telegramChatId || process.env.TELEGRAM_CHAT_ID;
-
     if (!this.httpOnly) {
       this.connect();
     }
   }
 
-  /**
-   * 连接到 WebSocket 服务器
-   */
   connect() {
     const wsUrl = this.apiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
     this.ws = new WebSocket(`${wsUrl}/?bot_id=${this.botId}`);
@@ -43,8 +39,6 @@ class BotBridgeClient {
       this.connected = true;
       this.reconnectAttempts = 0;
       this.onConnectionChange(true);
-
-      // 发送离线时缓存的消息
       this.flushMessageQueue();
     });
 
@@ -62,7 +56,6 @@ class BotBridgeClient {
       this.connected = false;
       this.onConnectionChange(false);
 
-      // 尝试重连
       if (this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
         const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
@@ -76,9 +69,6 @@ class BotBridgeClient {
     });
   }
 
-  /**
-   * 处理收到的消息
-   */
   handleMessage(message) {
     switch (message.type) {
       case 'connected':
@@ -86,22 +76,31 @@ class BotBridgeClient {
         break;
 
       case 'message':
-        // 新消息
-        this.onMessage(message);
+        this.onMessage({
+          source: 'bridge',
+          sender: message.sender,
+          content: message.content,
+          timestamp: message.timestamp,
+          metadata: message.metadata
+        });
         this.sendAck(message);
         break;
 
       case 'unread_messages':
-        // 离线时的未读消息
         console.log(`[BotBridge] Received ${message.count} unread message(s)`);
         message.messages.forEach(msg => {
-          this.onMessage(msg);
+          this.onMessage({
+            source: 'bridge',
+            sender: msg.sender,
+            content: msg.content,
+            timestamp: msg.created_at,
+            metadata: msg.metadata
+          });
           this.sendAck(msg);
         });
         break;
 
       case 'pong':
-        // 心跳响应
         break;
 
       default:
@@ -109,9 +108,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 发送消息确认
-   */
   sendAck(message) {
     if (this.connected && message.id) {
       this.ws.send(JSON.stringify({
@@ -121,10 +117,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 发送消息给其他 bot
-   * 如果 WebSocket 未连接，则回退到 HTTP API
-   */
   async sendMessage(recipient, content, metadata = {}) {
     const message = {
       type: 'send',
@@ -134,7 +126,7 @@ class BotBridgeClient {
       metadata: {
         ...metadata,
         timestamp: new Date().toISOString(),
-        telegram_message_id: metadata.telegram_message_id // Telegram 消息 ID
+        telegram_message_id: metadata.telegram_message_id
       }
     };
 
@@ -142,7 +134,6 @@ class BotBridgeClient {
       this.ws.send(JSON.stringify(message));
       return { success: true, sent: true };
     } else {
-      // 回退到 HTTP API
       try {
         const response = await axios.post(`${this.apiUrl}/api/messages`, {
           sender: this.botId,
@@ -158,9 +149,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 广播消息给所有 bot（除了自己）
-   */
   broadcast(content, metadata = {}) {
     const message = {
       type: 'broadcast',
@@ -180,24 +168,17 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 发送离线时缓存的消息
-   */
   flushMessageQueue() {
     if (this.messageQueue.length > 0) {
       console.log(`[BotBridge] Sending ${this.messageQueue.length} queued message(s)`);
       const queue = [...this.messageQueue];
       this.messageQueue = [];
-
       queue.forEach(message => {
         this.ws.send(JSON.stringify(message));
       });
     }
   }
 
-  /**
-   * 回复消息
-   */
   replyTo(originalMessage, content, metadata = {}) {
     return this.sendMessage(
       originalMessage.sender,
@@ -209,9 +190,6 @@ class BotBridgeClient {
     );
   }
 
-  /**
-   * 检查服务是否可用
-   */
   async healthCheck() {
     try {
       const response = await axios.get(`${this.apiUrl}/health`, { timeout: 3000 });
@@ -221,9 +199,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 获取服务状态
-   */
   async getStatus() {
     try {
       const response = await axios.get(`${this.apiUrl}/api/status`);
@@ -233,9 +208,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 获取在线 bot 列表
-   */
   async getConnectedBots() {
     try {
       const response = await axios.get(`${this.apiUrl}/api/connections`);
@@ -245,9 +217,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 获取未读消息（HTTP Fallback）
-   */
   async getUnreadMessages() {
     try {
       const response = await axios.get(
@@ -268,9 +237,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 标记消息为已读（HTTP Fallback）
-   */
   async markAsRead(messageId) {
     try {
       const response = await axios.post(`${this.apiUrl}/api/messages/${messageId}/read`);
@@ -281,9 +247,6 @@ class BotBridgeClient {
     }
   }
 
-  /**
-   * 断开连接
-   */
   disconnect() {
     if (this.ws) {
       this.ws.close();
@@ -292,7 +255,208 @@ class BotBridgeClient {
   }
 }
 
-// === Telegram 集成 ===
+// === Context-Aware Bot (合并 Telegram + Bridge 消息) ===
+
+class ContextAwareBot {
+  constructor(config) {
+    this.bridge = new BotBridgeClient(config);
+
+    // Telegram 配置
+    this.telegramBotToken = config.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
+    this.telegramChatIds = this.parseChatIds(
+      config.telegramChatIds || process.env.TELEGRAM_CHAT_IDS
+    );
+
+    // 消息存储
+    this.messages = new Map(); // key: timestamp + sender, value: message object
+
+    // 回调
+    this.onNewMessage = config.onNewMessage || (() => {});
+    this.onDecideReply = config.onDecideReply || ((context) => null);
+
+    // 启动监听
+    this.startListening();
+  }
+
+  /**
+   * 解析群聊 ID（支持单个或多个）
+   */
+  parseChatIds(chatIds) {
+    if (!chatIds) return [];
+    if (typeof chatIds === 'string') {
+      return chatIds.split(',').map(id => id.trim());
+    }
+    return chatIds;
+  }
+
+  /**
+   * 启动消息监听
+   */
+  startListening() {
+    // 监听 Bridge 消息
+    this.bridge.onMessage = (message) => {
+      this.addMessage({
+        source: 'bridge',
+        ...message
+      });
+    };
+
+    // Telegram 消息需要通过外部传入（见 addTelegramMessage）
+  }
+
+  /**
+   * 添加 Telegram 消息（从外部 webhook 或轮询调用）
+   */
+  addTelegramMessage(telegramMessage) {
+    const message = {
+      source: 'telegram',
+      sender: telegramMessage.from?.username || telegramMessage.from?.first_name || 'user',
+      userId: telegramMessage.from?.id,
+      content: telegramMessage.text || telegramMessage.caption || '',
+      timestamp: new Date(telegramMessage.date * 1000).toISOString(),
+      messageId: telegramMessage.message_id,
+      chatId: telegramMessage.chat.id,
+      metadata: {
+        reply_to_message_id: telegramMessage.reply_to_message?.message_id
+      }
+    };
+
+    this.addMessage(message);
+  }
+
+  /**
+   * 添加消息到存储并触发回调
+   */
+  addMessage(message) {
+    // 生成唯一键
+    const key = `${message.timestamp}_${message.source}_${message.sender}`;
+    this.messages.set(key, message);
+
+    console.log(`[Context] New message: [${message.source}] ${message.sender}: ${message.content}`);
+
+    // 触发新消息回调
+    this.onNewMessage(message);
+  }
+
+  /**
+   * 获取按时间排序的完整聊天记录
+   */
+  getChatHistory(options = {}) {
+    const {
+      limit = 100,
+      after = null,
+      sources = ['telegram', 'bridge'],
+      chatIds = null
+    } = options;
+
+    // 过滤消息
+    let filtered = Array.from(this.messages.values());
+
+    if (after) {
+      filtered = filtered.filter(m => new Date(m.timestamp) > new Date(after));
+    }
+
+    if (sources && sources.length > 0) {
+      filtered = filtered.filter(m => sources.includes(m.source));
+    }
+
+    if (chatIds && chatIds.length > 0) {
+      filtered = filtered.filter(m => !m.chatId || chatIds.includes(m.chatId));
+    }
+
+    // 按时间排序
+    filtered.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    // 限制数量
+    return filtered.slice(-limit);
+  }
+
+  /**
+   * 获取最近的上下文（用于 OpenClaw 理解）
+   */
+  getContext(options = {}) {
+    const { limit = 20, chatId = null } = options;
+    const history = this.getChatHistory({ limit, chatIds: chatId ? [chatId] : null });
+
+    // 格式化为易读格式
+    return history.map(m => {
+      const prefix = m.source === 'bridge' ? `[来自 ${m.sender}]` : '';
+      return `${m.sender}: ${prefix} ${m.content}`;
+    }).join('\n');
+  }
+
+  /**
+   * 决定是否回复
+   */
+  decideReply(options = {}) {
+    const { limit = 10, chatId = null } = options;
+    const context = this.getChatHistory({ limit, chatIds: chatId ? [chatId] : null });
+
+    // 调用用户自定义的决策函数
+    return this.onDecideReply(context);
+  }
+
+  /**
+   * 发送消息到 Telegram 群聊，并通知服务器
+   */
+  async sendMessageToGroup(chatId, content, options = {}) {
+    const { alsoNotifyBridge = true, notifyRecipient = null } = options;
+
+    // 发送到 Telegram
+    let telegramResult = null;
+    try {
+      const url = `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`;
+      const response = await axios.post(url, {
+        chat_id: chatId,
+        text: content
+      });
+      telegramResult = response.data;
+    } catch (error) {
+      console.error('[Telegram] Send error:', error.response?.data || error.message);
+      throw error;
+    }
+
+    // 同时发送到服务器（通知其他机器人）
+    if (alsoNotifyBridge && notifyRecipient) {
+      await this.bridge.sendMessage(notifyRecipient, content, {
+        telegram_message_id: telegramResult.result?.message_id,
+        chat_id: chatId
+      });
+    }
+
+    return telegramResult;
+  }
+
+  /**
+   * 处理来自 Telegram 的消息
+   */
+  handleTelegramMessage(telegramMessage) {
+    // 添加到上下文
+    this.addTelegramMessage(telegramMessage);
+
+    // 决定是否回复
+    const decision = this.decideReply({ chatId: telegramMessage.chat.id });
+
+    if (decision && decision.shouldReply) {
+      this.sendMessageToGroup(
+        telegramMessage.chat.id,
+        decision.reply,
+        {
+          alsoNotifyBridge: true,
+          notifyRecipient: decision.notifyRecipient || null
+        }
+      );
+    }
+  }
+
+  get bridge() {
+    return this.bridge;
+  }
+
+  disconnect() {
+    this.bridge.disconnect();
+  }
+}
 
 /**
  * 将消息发送到 Telegram 群聊
@@ -314,141 +478,4 @@ async function sendToTelegram(botToken, chatId, text, replyToMessageId = null) {
   }
 }
 
-/**
- * BotBridge 集成类
- * 同时管理 WebSocket 连接和 Telegram 发送
- */
-class BotBridgeTelegram {
-  constructor(config) {
-    this.bridge = new BotBridgeClient(config);
-
-    // 配置
-    this.telegramBotToken = config.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
-    this.telegramChatId = config.telegramChatId || process.env.TELEGRAM_CHAT_ID;
-
-    // 处理来自其他 bot 的消息
-    this.bridge.onMessage = async (message) => {
-      console.log(`[Bridge] Received from ${message.sender}: ${message.content}`);
-
-      // 转发到 Telegram 群聊（如果配置了）
-      if (this.telegramBotToken && this.telegramChatId) {
-        try {
-          await sendToTelegram(
-            this.telegramBotToken,
-            this.telegramChatId,
-            `[来自 ${message.sender}]: ${message.content}`,
-            message.metadata?.telegram_message_id
-          );
-        } catch (err) {
-          console.error('[Bridge] Failed to forward to Telegram:', err);
-        }
-      }
-    };
-  }
-
-  /**
-   * 发送消息到其他 bot，同时也发送到 Telegram 群聊
-   */
-  async sendMessage(recipient, content, alsoSendToTelegram = true) {
-    // 发送到其他 bot
-    const result = await this.bridge.sendMessage(recipient, content);
-
-    // 也发送到 Telegram 群聊
-    if (alsoSendToTelegram && this.telegramBotToken && this.telegramChatId) {
-      try {
-        const telegramResult = await sendToTelegram(
-          this.telegramBotToken,
-          this.telegramChatId,
-          content
-        );
-
-        return {
-          ...result,
-          telegram_message_id: telegramResult.result?.message_id
-        };
-      } catch (err) {
-        console.error('[Bridge] Failed to send to Telegram:', err);
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * 处理来自 Telegram 的消息
-   */
-  async handleTelegramMessage(telegramMessage) {
-    const { text, message_id, reply_to_message } = telegramMessage;
-    const sender = telegramMessage.from?.username || 'unknown';
-
-    // 检查是否是回复其他 bot
-    if (reply_to_message?.text) {
-      const replyText = reply_to_message.text;
-      // 解析出被回复的 bot ID
-      const match = replyText.match(/^\[来自 (\w+)\]:/);
-      if (match) {
-        const targetBotId = match[1];
-        // 回复给目标 bot
-        await this.sendMessage(targetBotId, text, false);
-        return { success: true, forwarded: true };
-      }
-    }
-
-    // 如果没有回复，检查是否 @ 了某个 bot
-    if (text?.startsWith('@')) {
-      const parts = text.split(' ');
-      const targetBotId = parts[0].substring(1);
-      const messageContent = parts.slice(1).join(' ');
-
-      if (messageContent) {
-        await this.sendMessage(targetBotId, messageContent, false);
-        return { success: true, forwarded: true };
-      }
-    }
-
-    return { success: true, forwarded: false };
-  }
-
-  get bridge() {
-    return this.bridge;
-  }
-
-  disconnect() {
-    this.bridge.disconnect();
-  }
-}
-
-/**
- * 如果直接运行此文件，启动 CLI 客户端
- */
-if (require.main === module) {
-  const config = {
-    apiUrl: process.env.BRIDGE_API_URL,
-    botId: process.env.BOT_ID,
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
-    telegramChatId: process.env.TELEGRAM_CHAT_ID
-  };
-
-  console.log('Bot Bridge Client (WebSocket + Telegram)');
-  console.log('Configuration:');
-  console.log(`  API URL: ${config.apiUrl}`);
-  console.log(`  Bot ID: ${config.botId}`);
-  console.log(`  Telegram: ${config.telegramBotToken ? 'enabled' : 'disabled'}`);
-
-  if (!config.botId) {
-    console.error('Error: BOT_ID is required');
-    process.exit(1);
-  }
-
-  const client = new BotBridgeTelegram(config);
-
-  console.log('\nConnected! Waiting for messages...\n');
-
-  process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    client.disconnect();
-    process.exit(0);
-  });
-}
-
-module.exports = { BotBridgeClient, BotBridgeTelegram, sendToTelegram };
+module.exports = { BotBridgeClient, ContextAwareBot, sendToTelegram };

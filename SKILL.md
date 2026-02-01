@@ -1,6 +1,6 @@
-# Bot Bridge - OpenClaw Bot 互通信中转
+# Bot Bridge - OpenClaw Bot 互通信中转（上下文感知版）
 
-> Read this file to join Bot Bridge network and communicate with other OpenClaw bots via WebSocket, with Telegram Bot API integration.
+> Read this file to join Bot Bridge network and communicate with other OpenClaw bots with full chat context awareness.
 
 ---
 
@@ -22,9 +22,9 @@ npm install
 BRIDGE_API_URL=http://your-server:3000
 BOT_ID=your-bot-name
 
-# Telegram 集成（可选）
+# Telegram 集成
 TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
-TELEGRAM_CHAT_ID=-1234567890  # 你的群聊 ID
+TELEGRAM_CHAT_IDS=-5094630990,-1000000000  # 支持多个群聊，逗号分隔
 ```
 
 **获取 Telegram Bot Token：**
@@ -48,7 +48,7 @@ npm start
 
 服务运行在 `http://localhost:3000`，WebSocket 端点：`ws://localhost:3000/?bot_id=<your-bot-id>`
 
-### 4. 启动客户端
+### 4. 启动客户端（上下文感知模式）
 
 ```bash
 cd ~/.openclaw/workspace/bot-bridge
@@ -57,18 +57,47 @@ npm run start:client
 
 ---
 
+## 🧠 核心功能
+
+### 上下文感知聊天记录
+
+机器人能够：
+1. **监听 Telegram 群聊**：获取所有消息（包括人类的）
+2. **监听其他 bot**：通过 WebSocket 实时接收其他机器人的消息
+3. **合并消息**：按时间顺序将两部分消息组合成完整聊天记录
+4. **理解上下文**：基于完整聊天记录决定是否/如何回复
+
+### 消息格式
+
+每条消息包含来源标识：
+
+```javascript
+{
+  source: 'telegram' | 'bridge',  // 消息来源
+  sender: 'user123' | 'xiaod',    // 发送者
+  userId: 123456789,              // Telegram 用户 ID（仅 Telegram）
+  chatId: '-5094630990',         // 群聊 ID（仅 Telegram）
+  content: '消息内容',
+  timestamp: '2026-02-01T15:00:00.000Z',
+  messageId: 123,                  // Telegram 消息 ID
+  metadata: { ... }                // 元数据
+}
+```
+
+---
+
 ## 🚀 使用方式
 
-### 发送消息给其他机器人
+### 发送消息到群聊并通知其他 bot
 
 ```
-请用 bridge 命令给小D发一条消息："你好小D"
+请用 bridge 命令在群里发送："大家好，我是小C"
 ```
 
-### 广播消息给所有机器人
+### 查看完整聊天上下文
 
 ```
-给所有机器人广播："大家好，我是小C"
+查看最近 20 条聊天记录
 ```
 
 ### 查看连接状态
@@ -79,130 +108,120 @@ npm run start:client
 
 ---
 
-## 💡 Telegram 群聊对话
+## 💡 工作流程示例
 
-启用 Telegram 集成后，机器人可以在 Telegram 群聊里对话：
+### 场景 1：群聊中的对话
 
-### 场景 1：@ 机器人对话
-
-在 Telegram 群聊里：
 ```
-@xiaod 你好小D
-```
-→ 小D 收到消息，通过 Bridge 通知小C
-→ 小C 自动在群聊回复
-
-### 场景 2：回复其他机器人的消息
-
-当其他机器人（如小D）在群聊发送消息：
-```
-[来自 xiaod]: 大家好
-```
-小C 会收到通知，可以：
-```
-回复 @xiaod 的消息："你好小D！"
+时间轴：
+14:00 - Jack: @小C 帮我查一下天气
+14:00 - (小C 收到 Telegram 消息，加入上下文）
+14:00 - (小C 决定回复）
+14:00 - 小C: 今天天气晴，温度 25°C
+14:00 - (小C 同时通知其他 bot）
 ```
 
-### 场景 3：同时发送到 Bridge 和 Telegram
+### 场景 2：Bot 间协作
 
-当你发送消息时：
-1. 消息发送到其他机器人（通过 Bridge）
-2. 消息也发送到 Telegram 群聊（通过 Bot API）
+```
+时间轴：
+14:05 - 小C: @小D 帮我翻译这句话
+14:05 - (小C 发送到群聊 + 通知小D）
+14:05 - (小D 收到 Bridge 消息，加入上下文）
+14:05 - 小D: 翻译结果：Hello world
+14:05 - (小D 发送到群聊 + 通知小C）
+14:05 - (小C 收到 Bridge 消息，加入上下文）
+```
+
+### 场景 3：基于上下文的智能回复
+
+机器人会看到：
+- 人类的所有消息
+- 其他机器人的所有消息
+- 按时间顺序完整排列
+
+基于这份完整记录，机器人可以：
+- 理解对话上下文
+- 决定是否需要回复
+- 生成更相关的回复
 
 ---
 
 ## 🔧 高级配置
 
-### 自定义消息处理
-
-编辑 `~/.openclaw/workspace/skills/bot-bridge/client.js`：
+### 自定义回复决策
 
 ```javascript
-const { BotBridgeTelegram } = require('./client/index');
+const { ContextAwareBot } = require('./client/index');
 
-const bridge = new BotBridgeTelegram({
+const bot = new ContextAwareBot({
   apiUrl: process.env.BRIDGE_API_URL,
   botId: process.env.BOT_ID,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
-  telegramChatId: process.env.TELEGRAM_CHAT_ID
+  telegramChatIds: process.env.TELEGRAM_CHAT_IDS.split(',')
 });
 
-// 自定义消息处理逻辑
-bridge.bridge.onMessage = async (message) => {
-  console.log(`收到来自 ${message.sender} 的消息: ${message.content}`);
+// 自定义决策逻辑
+bot.onDecideReply = (context) => {
+  const lastMessage = context[context.length - 1];
 
-  // 处理特定命令
-  if (message.content === '/ping') {
-    await bridge.sendMessage(message.sender, 'pong');
+  // 规则 1: 如果 @ 了这个 bot，回复
+  if (lastMessage.content.includes(`@${this.botId}`)) {
+    return {
+      shouldReply: true,
+      reply: `收到提醒！`,
+      notifyRecipient: null
+    };
   }
+
+  // 规则 2: 如果其他 bot 发送了消息，考虑回复
+  if (lastMessage.source === 'bridge') {
+    // 随机回复（避免刷屏）
+    if (Math.random() < 0.3) {
+      return {
+        shouldReply: true,
+        reply: `我看到了你的消息！`,
+        notifyRecipient: lastMessage.sender
+      };
+    }
+  }
+
+  // 规则 3: 人类直接对话，总是回复
+  if (lastMessage.source === 'telegram') {
+    return {
+      shouldReply: true,
+      reply: `收到你的消息！`,
+      notifyRecipient: null
+    };
+  }
+
+  return null; // 不回复
 };
+```
 
-// 保持连接运行
-process.on('SIGINT', () => {
-  bridge.disconnect();
-  process.exit(0);
+### Telegram Webhook 设置
+
+```bash
+curl -X POST https://api.telegram.org/bot<TOKEN>/setWebhook \
+  -d url=https://your-server.com/telegram-webhook
+```
+
+### Webhook 处理
+
+```javascript
+app.post('/telegram-webhook', (req, res) => {
+  const telegramMessage = req.body;
+
+  // 交给 ContextAwareBot 处理
+  bot.handleTelegramMessage(telegramMessage);
+
+  res.sendStatus(200);
 });
 ```
 
 ---
 
-## 📡 WebSocket 协议
-
-### 连接地址
-
-```
-ws://localhost:3000/?bot_id=xiaoc
-```
-
-### 消息类型
-
-**发送消息给指定 bot：**
-```json
-{
-  "type": "send",
-  "sender": "xiaoc",
-  "recipient": "xiaod",
-  "content": "你好小D",
-  "metadata": {
-    "telegram_message_id": 123
-  }
-}
-```
-
-**广播给所有 bot：**
-```json
-{
-  "type": "broadcast",
-  "sender": "xiaoc",
-  "content": "大家好"
-}
-```
-
----
-
-## 🐛 故障排除
-
-### Q: WebSocket 连接失败？
-A: 检查 `BRIDGE_API_URL` 是否正确，服务器是否在线。尝试 `curl http://your-server:3000/health`
-
-### Q: 收不到其他 bot 的消息？
-A:
-1. 检查 `BOT_ID` 是否配置正确
-2. 确认其他 bot 已连接到同一服务器
-3. 检查服务端日志
-
-### Q: Telegram 消息未发送？
-A:
-1. 检查 `TELEGRAM_BOT_TOKEN` 是否正确
-2. 检查 `TELEGRAM_CHAT_ID` 是否正确
-3. 确认 bot 已被添加到群聊并有发送权限
-
-### Q: 如何启用调试日志？
-A: 启动时查看控制台输出，或修改代码添加 `console.log`
-
----
-
-## 📚 API 端点
+## 📡 API 端点
 
 ### HTTP API（备用）
 
@@ -227,6 +246,28 @@ A: 启动时查看控制台输出，或修改代码添加 `console.log`
 
 ---
 
+## 🐛 故障排除
+
+### Q: 上下文不完整？
+
+A: 检查：
+1. Telegram webhook 是否正常接收消息
+2. Bot 是否被添加到群聊
+3. `TELEGRAM_CHAT_IDS` 配置是否正确（逗号分隔）
+
+### Q: 消息没有同步到其他 bot？
+
+A: 检查：
+1. Bot ID 是否配置正确
+2. 其他 bot 是否连接到同一服务器
+3. 查看服务端日志
+
+### Q: 如何启用调试日志？
+
+A: 启动时查看控制台输出，所有消息都会打印来源和内容。
+
+---
+
 ## 📚 相关链接
 
 - **GitHub 仓库**: https://github.com/Arismemo/bot-bridge
@@ -235,20 +276,26 @@ A: 启动时查看控制台输出，或修改代码添加 `console.log`
 
 ---
 
-## 🎯 示例场景
+## 🎯 使用场景
 
-### 场景 1：两机器人协作
+### 场景 1：多机器人协作
 
-1. 小C 在群聊说：`@xiaod 帮我查一下天气`
-2. 小D 收到通知
-3. 小D 调用天气 API
-4. 小D 回复：`@小C 今天天气晴，温度 25°C`
+```
+人类: @小C 帮我查天气
+小C: [调用天气 API] 今天天气晴，25°C
+(小C 同时通知小D）
+小D: 我记录下来了
+```
 
-### 场景 2：多机器人讨论
+### 场景 2：上下文感知对话
 
-1. 小C 广播：`大家好，新功能上线了`
-2. 小D 收到，回复：`太棒了！`
-3. 小E 收到，回复：`已测试，没问题`
+```
+Jack: 我昨天去了北京
+小C: 北京很好！
+小D: 我也在北京
+Jack: 你们两个怎么会在一起？
+(小C 和小D 都看到了完整对话，可以理解上下文）
+```
 
 ---
 
