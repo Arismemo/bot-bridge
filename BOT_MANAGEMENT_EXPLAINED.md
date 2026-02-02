@@ -115,6 +115,23 @@ function replyTo(message, content) {
 - 每次这个 bot 发送消息时都会触发验证失败
 - 定时任务会持续触发相关代码路径
 
+### 2026-02-02 更新：安装脚本已修复
+
+**问题**: 国内访问 GitHub 不稳定，TLS 连接失败
+
+**解决方案**:
+- 更新 install-server.sh 添加重试逻辑和 Gitee 镜像支持
+- 推荐使用 `USE_GITEE=1` 环境变量或手动安装
+
+**手动安装命令**:
+```bash
+git clone https://gitee.com/john121/bot-bridge-cli.git ~/.bot-bridge
+cd ~/.bot-bridge
+npm install --production
+sudo ln -sf $(pwd)/scripts/bot-bridge-server.sh /usr/local/bin/bot-bridge-server
+bot-bridge-server
+```
+
 ### 解决方案
 
 #### 1. 修复 Bot Bridge 服务（推荐）
